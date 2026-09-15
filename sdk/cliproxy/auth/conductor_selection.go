@@ -1945,7 +1945,14 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 			pinnedAuthID = boundAuthID
 		}
 	}
-	if !isRequestRetryRoundError(err) || !m.retryAllowedForRequest(ctx, attempt, providers, model, eligibility, pinnedAuthID, defaultRequestRetry, opts.Headers) {
+	// Selection failures have no upstream HTTP status when every candidate is
+	// temporarily unavailable. Consult credential recovery deadlines so a fresh
+	// request can wait just like one that encountered the upstream failure itself.
+	selectionUnavailable := status == 0 && isAuthUnavailableError(err) && !IsTerminalAuthError(err)
+	if selectionUnavailable {
+		status = http.StatusServiceUnavailable
+	}
+	if (!selectionUnavailable && !isRequestRetryRoundError(err)) || !m.retryAllowedForRequest(ctx, attempt, providers, model, eligibility, pinnedAuthID, defaultRequestRetry, opts.Headers) {
 		return 0, false
 	}
 	wait, found := m.closestCooldownWaitWithAttemptedForRequest(ctx, providers, model, attempt, eligibility, pinnedAuthID, defaultRequestRetry, status, attempted, opts.Headers)
@@ -1954,6 +1961,9 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 			return 0, false
 		}
 		return wait, true
+	}
+	if selectionUnavailable {
+		return 0, false
 	}
 	if retryAfter := retryAfterFromError(err); retryAfter != nil {
 		if *retryAfter < 0 || (*retryAfter > 0 && (maxWait <= 0 || *retryAfter > maxWait)) {
@@ -3443,7 +3453,7 @@ func (m *Manager) warnLogAuthUnavailable(ctx context.Context, providers []string
 		totalCandidates++
 		checkModel := m.selectionModelForAuth(candidate, model)
 		blocked, reason, next := isAuthBlockedForModelForRequest(ctx, candidate, checkModel, now, opts.Headers)
-		if blocked && reason == blockReasonCooldown {
+		if blocked && (reason == blockReasonCooldown || (reason == blockReasonOther && next.After(now))) {
 			coolingSummaries = append(coolingSummaries, authCoolingSummary(candidate, checkModel, next, now))
 		}
 	}
