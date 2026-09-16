@@ -167,6 +167,9 @@ routing:
   # Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,
   # followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,
   # execution or derived session identity, and the existing first-message hash fallback.
+  # With fill-first and an identified caller, requests without explicit session IDs
+  # share a default credential binding per API key, provider pool, and base model.
+  # This routing-only binding does not replace conversation or upstream cache IDs.
   # Automatic failover is always enabled when bound auth becomes unavailable.
   # An established binding outranks credential priority: once a session is bound, that
   # credential is kept even if a higher-priority credential recovers. Credential priority

@@ -2267,6 +2267,9 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	m.mu.RLock()
 	selector := m.selector
 	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = selectionArgForSelector(selector, model)
+	if affinity, ok := selector.(*SessionAffinitySelector); ok {
+		affinity.setDefaultSessionProviders(opts.Metadata, providerSet)
+	}
 	candidates := make([]*Auth, 0, len(m.auths))
 	modelKey := strings.TrimSpace(model)
 	// Always use base model name (without thinking suffix) for auth matching.

@@ -464,6 +464,8 @@ type RoutingConfig struct {
 	// Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,
 	// followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,
 	// execution or derived session identity, and the existing message-content hash fallback.
+	// With fill-first, requests without explicit session IDs share a routing-only
+	// default binding per identified caller, provider pool, and base model.
 	// Automatic failover is always enabled when bound auth becomes unavailable.
 	SessionAffinity bool `yaml:"session-affinity,omitempty" json:"session-affinity,omitempty"`
 

@@ -1086,7 +1086,8 @@ func (s *SessionAffinitySelector) Trees() *cliproxysession.InMemorySessionTreeSt
 
 // Pick selects an auth with session affinity when possible.
 // Explicit Claude Code, Codex, OpenCode, pi, and request-body session signals
-// are absolute authority. Requests without those signals use the Merkle LCP
+// are absolute authority. Fill-first requests without those signals share a
+// caller-scoped default routing binding. Other requests use the Merkle LCP
 // matcher before retaining the legacy derived/hash fallback behavior.
 //
 // An established binding outranks credential priority: a bound credential that is still
@@ -1104,13 +1105,18 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	}
 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = provider
 	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = model
+	delete(opts.Metadata, defaultSessionAffinityCacheKeyMetadataKey)
 
 	// Explicit harness identities are absolute authority. The LCP matcher is only
 	// consulted when no header, body, or execution-session identity is present.
 	explicitID, explicitFallbackID := extractExplicitSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	defaultID := ""
 	if explicitID == "" {
-		if auth, handled, errLCP := s.pickLCP(ctx, provider, model, opts, auths, entry); handled || errLCP != nil {
-			return auth, errLCP
+		defaultID = s.defaultSessionID(provider, model, opts.Metadata)
+		if defaultID == "" {
+			if auth, handled, errLCP := s.pickLCP(ctx, provider, model, opts, auths, entry); handled || errLCP != nil {
+				return auth, errLCP
+			}
 		}
 	} else if opts.Metadata != nil {
 		delete(opts.Metadata, cliproxyexecutor.LCPAffinitySessionIDMetadataKey)
@@ -1129,14 +1135,18 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 
 	primaryID, fallbackID := explicitID, explicitFallbackID
 	if primaryID == "" {
-		primaryID, fallbackID = extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+		if defaultID != "" {
+			primaryID = defaultID
+		} else {
+			primaryID, fallbackID = extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+		}
 	}
 	if primaryID != "" {
 		primaryID = cliproxysession.BoundSessionIdentity(primaryID)
 		if fallbackID != "" {
 			fallbackID = cliproxysession.BoundSessionIdentity(fallbackID)
 		}
-		if opts.Metadata != nil {
+		if defaultID == "" {
 			opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = primaryID
 		}
 	}
@@ -1164,6 +1174,10 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 
 	modelKey := canonicalModelKey(model)
 	cacheKey := provider + "::" + primaryID + "::" + modelKey
+	if defaultID != "" {
+		// Keep this routing identity separate from conversation and upstream cache identities.
+		opts.Metadata[defaultSessionAffinityCacheKeyMetadataKey] = cacheKey
+	}
 	isFork := false
 	if opts.Metadata != nil {
 		if forkFlag, ok := opts.Metadata[cliproxyexecutor.IsForkMetadataKey].(bool); ok && forkFlag {
@@ -1521,8 +1535,11 @@ func selectorLogEntry(ctx context.Context) *log.Entry {
 	return log.NewEntry(log.StandardLogger())
 }
 
-// truncateSessionID shortens session ID for logging (first 8 chars + "...")
+// truncateSessionID shortens session IDs while preserving the default routing namespace.
 func truncateSessionID(id string) string {
+	if strings.HasPrefix(id, defaultSessionIDPrefix) {
+		return defaultSessionIDPrefix + truncateSessionID(strings.TrimPrefix(id, defaultSessionIDPrefix))
+	}
 	if len(id) <= 20 {
 		return id
 	}
@@ -1687,6 +1704,16 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 		// Under session-affinity-rebind-on: quota, transient failures fail over for
 		// the current request without unbinding the session from its bound credential.
 		return
+	}
+	if explicitID == "" && s.cache != nil {
+		if cacheKey := sessionMetadataString(res.Options.Metadata, defaultSessionAffinityCacheKeyMetadataKey); cacheKey != "" {
+			if res.Success {
+				s.cache.Touch(cacheKey, res.AuthID)
+			} else {
+				s.cache.CompareAndDelete(cacheKey, res.AuthID)
+			}
+			return
+		}
 	}
 
 	// LCP bindings are independent from explicit harness bindings. A successful
