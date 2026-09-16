@@ -116,3 +116,20 @@ func TestParseConfigBytes_CodexSignInWithChatGPTIdentifier(t *testing.T) {
 		t.Fatalf("EffectiveSignInWithChatGPTIdentifier = %q, want CustomSIWCClient/2.0", got)
 	}
 }
+
+func TestParseConfigBytes_CodexFullBuffering(t *testing.T) {
+	cfg, errParse := ParseConfigBytes([]byte("codex:\n  stream-full-buffering: true\n  stream-full-buffer-max-bytes: 1048576\n"))
+	if errParse != nil {
+		t.Fatal(errParse)
+	}
+	if !cfg.Codex.StreamFullBuffering || cfg.Codex.StreamFullBufferMaxBytes != 1048576 {
+		t.Fatalf("full buffering config was not loaded: %+v", cfg.Codex)
+	}
+	defaults, errDefaults := ParseConfigBytes([]byte("{}"))
+	if errDefaults != nil {
+		t.Fatal(errDefaults)
+	}
+	if defaults.Codex.StreamFullBuffering {
+		t.Fatal("full buffering must remain opt-in")
+	}
+}

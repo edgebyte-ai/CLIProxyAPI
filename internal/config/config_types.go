@@ -360,6 +360,13 @@ type CodexConfig struct {
 	// When set (e.g. "20s"), the stream is released once the time ceiling is reached, avoiding
 	// reverse-proxy timeouts (e.g. Nginx 60s proxy_read_timeout).
 	StreamBootstrapTimeout string `yaml:"stream-bootstrap-timeout,omitempty" json:"stream-bootstrap-timeout,omitempty"`
+	// StreamFullBuffering holds the entire Codex response until successful completion.
+	// Retryable failures can then rotate credentials without exposing partial output.
+	// It supersedes bootstrap buffering and delays all output. Default is false.
+	StreamFullBuffering bool `yaml:"stream-full-buffering" json:"stream-full-buffering"`
+	// StreamFullBufferMaxBytes bounds buffered output including per-chunk overhead.
+	// Non-positive values use 64 MiB. Exceeding the limit stops the request without retry.
+	StreamFullBufferMaxBytes int64 `yaml:"stream-full-buffer-max-bytes" json:"stream-full-buffer-max-bytes"`
 	// OrphanDelegationCompatibility enables opt-in compatibility for orphan Codex delegation outputs.
 	OrphanDelegationCompatibility bool `yaml:"orphan-delegation-compatibility" json:"orphan-delegation-compatibility"`
 	// ModelLevelCooling scopes Codex usage_limit_reached quota cooldowns to the requested model

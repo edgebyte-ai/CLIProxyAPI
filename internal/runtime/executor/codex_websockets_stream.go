@@ -328,12 +328,29 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	}
 
 	buffering := e.cfg != nil && e.cfg.Codex.StreamBootstrapBuffering
+	var fullBuffer *helps.CodexResponseBuffer
+	if e.cfg != nil && e.cfg.Codex.StreamFullBuffering {
+		buffering = true
+		fullBuffer = helps.NewCodexResponseBuffer(e.cfg.Codex.StreamFullBufferMaxBytes)
+	}
 	var bootstrapTimeout time.Duration
 	var bootstrapStart time.Time
 	var exhaustionLogged bool
-	if buffering {
+	if buffering && fullBuffer == nil {
 		bootstrapTimeout = e.cfg.Codex.StreamBootstrapTimeoutDuration()
 		bootstrapStart = nowCodexBootstrap()
+	}
+	closeBufferedAttempt := func(reason string, cause error) {
+		if sess != nil {
+			e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, reason, cause)
+			sess.clearActive(conn, readCh)
+			unlockStreamSession()
+			if isEphemeralSession {
+				closeCodexWebsocketSession(sess, reason)
+			}
+		} else if closer != nil {
+			_ = closer.Close()
+		}
 	}
 
 	claudeInputTokens := helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
@@ -358,6 +375,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	if buffering {
 		for {
 			if ctx != nil && ctx.Err() != nil {
+				if fullBuffer != nil {
+					closeBufferedAttempt("context_done", ctx.Err())
+					return nil, ctx.Err()
+				}
 				if sess != nil {
 					sess.clearActive(conn, readCh)
 					unlockStreamSession()
@@ -372,6 +393,18 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh)
 			if errRead != nil {
 				mappedErr := codexWebsocketTurnEventID(mapCodexWebsocketReadError(errRead), originalPayload)
+				if fullBuffer != nil {
+					closeBufferedAttempt("read_error", mappedErr)
+					if ctx.Err() != nil {
+						return nil, ctx.Err()
+					}
+					helps.RecordAPIWebsocketError(ctx, e.cfg, "read", mappedErr)
+					reporter.PublishFailure(ctx, mappedErr)
+					if !fullBuffer.CanReplay() {
+						return nil, helps.StopStreamRetry(mappedErr)
+					}
+					return nil, mappedErr
+				}
 				if sess != nil {
 					e.invalidateUpstreamConn(sess, conn, "read_error", mappedErr)
 					sess.clearActive(conn, readCh)
@@ -396,8 +429,8 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			// terminal event, from the turn.
 			bufferedFrames++
 			timeSinceStart := nowCodexBootstrap().Sub(bootstrapStart)
-			timeoutReached := bootstrapTimeout > 0 && timeSinceStart >= bootstrapTimeout
-			windowOpen := bufferedFrames <= codexBootstrapMaxBufferedFrames && !timeoutReached
+			timeoutReached := fullBuffer == nil && bootstrapTimeout > 0 && timeSinceStart >= bootstrapTimeout
+			windowOpen := fullBuffer != nil || (bufferedFrames <= codexBootstrapMaxBufferedFrames && !timeoutReached)
 			if !windowOpen && !exhaustionLogged {
 				exhaustionLogged = true
 				exhausted := "frame budget"
@@ -409,6 +442,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			if msgType != websocket.TextMessage {
 				if msgType == websocket.BinaryMessage {
 					errBinary := fmt.Errorf("codex websockets executor: unexpected binary message")
+					if fullBuffer != nil {
+						closeBufferedAttempt("unexpected_binary", errBinary)
+						return nil, helps.StopStreamRetry(errBinary)
+					}
 					if sess != nil {
 						e.invalidateUpstreamConn(sess, conn, "unexpected_binary", errBinary)
 						sess.clearActive(conn, readCh)
@@ -441,8 +478,27 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
 			helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
 			payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgentV2)
+			// Full-response buffering needs no storage for heartbeat messages.
+			if fullBuffer != nil && ojson.GetBytesNoCopy(payload, "type").String() == "keepalive" {
+				continue
+			}
+			if fullBuffer != nil {
+				fullBuffer.ObserveEvent(payload)
+			}
 
 			if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
+				if fullBuffer != nil {
+					closeBufferedAttempt("upstream_error", wsErr)
+					if errClearReplay := clearCodexReasoningReplayOnWebsocketError(ctx, replayScope, payload); errClearReplay != nil {
+						return nil, helps.StopStreamRetry(errClearReplay)
+					}
+					helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", wsErr)
+					reporter.PublishFailure(ctx, wsErr)
+					if fullBuffer.CanReplay() && isCodexOverloadBootstrapFailure([]byte(wsErr.Error())) {
+						return nil, newCodexBootstrapOverloadErr([]byte(wsErr.Error()))
+					}
+					return nil, helps.StopStreamRetry(wsErr)
+				}
 				if sess != nil {
 					if timeoutReached && len(bufferedChunks) > 0 {
 						e.invalidateUpstreamConn(sess, conn, "upstream_error", wsErr)
@@ -483,12 +539,12 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				// can deliver anything.
 				overloadFailover := isCodexOverloadBootstrapFailure(terminalBody)
 				usageLimitFailover := isCodexUsageLimitError(terminalBody)
-				failoverPending := overloadFailover || usageLimitFailover
-				if failoverPending && timeoutReached {
+				failoverPending := (overloadFailover || usageLimitFailover) && (fullBuffer == nil || fullBuffer.CanReplay())
+				if failoverPending && fullBuffer == nil && timeoutReached {
 					failoverPending = false
 					helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap overload rejection after %d messages read / %v, time budget exhausted; delivering in-stream", bufferedFrames, timeSinceStart)
 				}
-				notifyDisconnect := !failoverPending && len(bufferedChunks) > 0
+				notifyDisconnect := fullBuffer == nil && !failoverPending && len(bufferedChunks) > 0
 				if sess != nil {
 					if notifyDisconnect {
 						e.invalidateUpstreamConn(sess, conn, "terminal_failure", streamErr)
@@ -507,6 +563,12 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					}
 					helps.RecordAPIWebsocketError(ctx, e.cfg, "replay_clear_error", errClearReplay)
 					reporter.PublishFailure(ctx, errClearReplay)
+					if fullBuffer != nil {
+						if isEphemeralSession {
+							closeCodexWebsocketSession(sess, "replay_clear_error")
+						}
+						return nil, helps.StopStreamRetry(errClearReplay)
+					}
 					return nil, errClearReplay
 				}
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", streamErr)
@@ -527,8 +589,21 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					}
 					return nil, streamErr
 				}
+				if fullBuffer != nil {
+					if isEphemeralSession {
+						closeCodexWebsocketSession(sess, "buffered_terminal_error")
+					}
+					return nil, helps.StopStreamRetry(streamErr)
+				}
 				bootstrapTerminalErr = streamErr
 				break
+			}
+			if fullBuffer != nil {
+				if errTerminal := helps.ValidateCodexBufferedTerminal(payload); errTerminal != nil {
+					closeBufferedAttempt("incomplete_response", errTerminal)
+					helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", errTerminal)
+					return nil, errTerminal
+				}
 			}
 
 			prepared.sessionReceipt.Observe(payload)
@@ -587,6 +662,19 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				currentChunks = helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, clientBody, line, &param, claudeInputTokens)
 			}
 
+			if fullBuffer != nil {
+				if errBuffer := fullBuffer.Append(currentChunks); errBuffer != nil {
+					closeBufferedAttempt("buffer_limit", errBuffer)
+					helps.RecordAPIWebsocketError(ctx, e.cfg, "buffer_limit", errBuffer)
+					return nil, errBuffer
+				}
+				if !isTerminalEvent {
+					continue
+				}
+				bufferedChunks = fullBuffer.Chunks()
+				immediateTerminal = true
+				break
+			}
 			// !isTerminalEvent is redundant against the closed allow-list, which admits no terminal
 			// type, and the empty-payload rule cannot fire on a payload already known non-empty. It
 			// stays as the guard a reader expects to find, and its SSE counterpart is !terminalSuccess.
