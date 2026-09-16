@@ -415,6 +415,11 @@ upstream:
     # proxy_read_timeout, is what bounds them.
     # Default: false
     stream-bootstrap-buffering: false
+    # Buffer the entire Codex response before delivering output so retryable overloads can fail over safely.
+    # This supersedes bootstrap buffering and delays all output until completion. Default: false.
+    stream-full-buffering: false
+    # Per-attempt buffered output limit including chunk overhead; <= 0 uses 64 MiB.
+    stream-full-buffer-max-bytes: 67108864
     # Optional maximum duration to hold back uncommitted response headers during bootstrap buffering.
     # When set (e.g. "20s"), if the time ceiling is reached before the first generated token,
     # the stream is released to the client and further in-stream overloads are delivered rather

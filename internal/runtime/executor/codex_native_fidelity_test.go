@@ -26,8 +26,8 @@ func testCodexNativeStreamFidelity(t *testing.T, source sdktranslator.Format) {
 	t.Helper()
 	for _, transport := range []string{"http", "websocket"} {
 		for _, lite := range []string{"", "header", "metadata"} {
-			for _, buffering := range []bool{false, true} {
-				t.Run(fmt.Sprintf("%s/lite=%s/buffering=%t", transport, lite, buffering), func(t *testing.T) {
+			for _, buffering := range []string{"none", "bootstrap", "full"} {
+				t.Run(fmt.Sprintf("%s/lite=%s/buffering=%s", transport, lite, buffering), func(t *testing.T) {
 					metadata := `{"type":"codex.response.metadata","headers":{"x-models-etag":"models-v1","x-codex-turn-state":"turn-1","x-codex-safety-buffering-enabled":"true","x-codex-safety-buffering-faster-model":"fixture-model"},"future":{"ok":true}}`
 					completed := `{"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[],"future":{"ok":true},"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`
 					events := []string{metadata, `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}}`, completed}
@@ -74,7 +74,7 @@ func testCodexNativeStreamFidelity(t *testing.T, source sdktranslator.Format) {
 					} else if lite == "metadata" {
 						payload = []byte(`{"model":"gpt-5.6-sol","input":[],"parallel_tool_calls":false,"client_metadata":{"ws_request_header_x_openai_internal_codex_responses_lite":"true"}}`)
 					}
-					cfg := &config.Config{Codex: config.CodexConfig{StreamBootstrapBuffering: buffering, DisableCodexCloaking: true}}
+					cfg := &config.Config{Codex: config.CodexConfig{StreamBootstrapBuffering: buffering == "bootstrap", StreamFullBuffering: buffering == "full", DisableCodexCloaking: true}}
 					executeStream := NewCodexExecutor(cfg).ExecuteStream
 					if transport == "websocket" {
 						executeStream = NewCodexWebsocketsExecutor(cfg).ExecuteStream

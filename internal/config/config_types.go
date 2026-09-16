@@ -282,6 +282,13 @@ type CodexConfig struct {
 	// When set (e.g. "20s"), the stream is released once the time ceiling is reached, avoiding
 	// reverse-proxy timeouts (e.g. Nginx 60s proxy_read_timeout).
 	StreamBootstrapTimeout string `yaml:"stream-bootstrap-timeout,omitempty" json:"stream-bootstrap-timeout,omitempty"`
+	// StreamFullBuffering holds the entire Codex response until successful completion.
+	// Retryable failures can then rotate credentials without exposing partial output.
+	// It supersedes bootstrap buffering and delays all output. Default is false.
+	StreamFullBuffering bool `yaml:"stream-full-buffering" json:"stream-full-buffering"`
+	// StreamFullBufferMaxBytes bounds buffered output including per-chunk overhead.
+	// Non-positive values use 64 MiB. Exceeding the limit stops the request without retry.
+	StreamFullBufferMaxBytes int64 `yaml:"stream-full-buffer-max-bytes" json:"stream-full-buffer-max-bytes"`
 	// OrphanDelegationCompatibility enables opt-in compatibility for orphan Codex delegation outputs.
 	OrphanDelegationCompatibility bool `yaml:"orphan-delegation-compatibility" json:"orphan-delegation-compatibility"`
 	// ModelLevelCooling scopes Codex usage_limit_reached quota cooldowns to the requested model
@@ -464,8 +471,6 @@ type RoutingConfig struct {
 	// Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,
 	// followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,
 	// execution or derived session identity, and the existing message-content hash fallback.
-	// With fill-first, requests without explicit session IDs share a routing-only
-	// default binding per identified caller, provider pool, and base model.
 	// Automatic failover is always enabled when bound auth becomes unavailable.
 	SessionAffinity bool `yaml:"session-affinity,omitempty" json:"session-affinity,omitempty"`
 

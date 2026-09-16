@@ -287,6 +287,14 @@ func TestBuildConfigChangeDetails_CodexOrphanDelegationCompatibility(t *testing.
 	expectContains(t, changes, "codex.orphan-delegation-compatibility: false -> true")
 }
 
+func TestBuildConfigChangeDetails_CodexFullBuffering(t *testing.T) {
+	oldCfg := &config.Config{}
+	newCfg := &config.Config{Codex: config.CodexConfig{StreamFullBuffering: true, StreamFullBufferMaxBytes: 1048576}}
+	changes := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, changes, "codex.stream-full-buffering: false -> true")
+	expectContains(t, changes, "codex.stream-full-buffer-max-bytes: 0 -> 1048576")
+}
+
 func TestBuildConfigChangeDetails_XAIKeys(t *testing.T) {
 	oldRetry := 1
 	newRetry := 0
