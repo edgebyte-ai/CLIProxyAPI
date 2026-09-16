@@ -205,6 +205,9 @@ routing:
   # LCP compaction matching requires at least 2 shared trailing turns; clients whose
   # compaction replaces all earlier turns with a summary should send X-Session-ID (or
   # another explicit session ID), or affinity starts a new binding at every compaction.
+  # With fill-first and an identified caller, requests without explicit session IDs
+  # share a default credential binding per API key, provider pool, and base model.
+  # This routing-only binding does not replace conversation or upstream cache IDs.
   # Automatic failover is always enabled when bound auth becomes unavailable.
   # An established binding outranks credential priority: once a session is bound, that
   # credential is kept even if a higher-priority credential recovers. Credential priority

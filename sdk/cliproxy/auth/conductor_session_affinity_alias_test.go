@@ -23,6 +23,8 @@ func TestManagerSessionAffinityAliasCooldownPreservesSelection(t *testing.T) {
 		for _, mode := range []string{"no-session", "explicit-session", "lcp"} {
 			for _, path := range []string{"select", "execute", "stream"} {
 				t.Run(strategy+"/"+mode+"/"+path, func(t *testing.T) {
+					usesLCP := mode == "lcp" && strategy != "fill-first"
+					usesDefault := mode == "lcp" && strategy == "fill-first"
 					ctx := context.Background()
 					const routeModel, targetModel = "affinity-alias", "affinity-healthy-target"
 					selector := NewSessionAffinitySelector(newFallback())
@@ -58,8 +60,11 @@ func TestManagerSessionAffinityAliasCooldownPreservesSelection(t *testing.T) {
 					var attempts []string
 					execute := func(_ context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 						attempts = append(attempts, auth.ID)
-						if mode == "lcp" && opts.Metadata[cliproxyexecutor.LCPAffinitySessionIDMetadataKey] == nil {
+						if usesLCP && opts.Metadata[cliproxyexecutor.LCPAffinitySessionIDMetadataKey] == nil {
 							t.Error("expected executor to receive the LCP session ID")
+						}
+						if usesDefault && opts.Metadata[defaultSessionAffinityCacheKeyMetadataKey] == nil {
+							t.Error("expected executor to retain the default routing binding")
 						}
 						if req.Model != targetModel {
 							t.Errorf("upstream model = %s, want %s", req.Model, targetModel)
@@ -125,7 +130,7 @@ func TestManagerSessionAffinityAliasCooldownPreservesSelection(t *testing.T) {
 						if errPick != nil || gotID != wantID {
 							t.Fatalf("%s: auth=%q error=%v, want %s; upstream attempts=%v", label, gotID, errPick, wantID, attempts)
 						}
-						if mode == "lcp" && path == "select" && opts.Metadata[cliproxyexecutor.LCPAffinitySessionIDMetadataKey] == nil {
+						if usesLCP && path == "select" && opts.Metadata[cliproxyexecutor.LCPAffinitySessionIDMetadataKey] == nil {
 							t.Fatal("expected LCP matching path to publish a session ID")
 						}
 					}
@@ -138,7 +143,11 @@ func TestManagerSessionAffinityAliasCooldownPreservesSelection(t *testing.T) {
 						wantAfterRecovery = highID
 					}
 					assertPick("higher-priority recovery preserves binding", "stable", wantAfterRecovery)
-					assertPick("fresh session uses highest priority", "fresh", highID)
+					wantFresh := highID
+					if usesDefault {
+						wantFresh = lowID
+					}
+					assertPick("fresh content respects the routing identity", "fresh", wantFresh)
 					cool(highID, targetModel)
 					cool(lowID, targetModel)
 					before := len(attempts)

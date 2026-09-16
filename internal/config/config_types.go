@@ -587,6 +587,8 @@ type RoutingConfig struct {
 	// LCP compaction matching requires at least 2 shared trailing turns; clients whose
 	// compaction replaces all earlier turns with a summary should send X-Session-ID (or
 	// another explicit session ID), or affinity starts a new binding at every compaction.
+	// With fill-first, requests without explicit session IDs share a routing-only
+	// default binding per identified caller, provider pool, and base model.
 	// Automatic failover is always enabled when bound auth becomes unavailable.
 	SessionAffinity bool `yaml:"session-affinity,omitempty" json:"session-affinity,omitempty"`
 
