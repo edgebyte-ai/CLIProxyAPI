@@ -141,7 +141,6 @@ func (h *Handler) APICall(c *gin.Context) {
 		reqHeaders = map[string]string{}
 	}
 
-	var hostOverride string
 	var token string
 	var tokenResolved bool
 	var tokenErr error
@@ -188,56 +187,123 @@ func (h *Handler) APICall(c *gin.Context) {
 		body.Data = strings.ReplaceAll(body.Data, "$TOKEN$", replacement)
 	}
 
-	var requestBody io.Reader
-	if body.Data != "" {
-		requestBody = strings.NewReader(body.Data)
-	}
-
-	req, errNewRequest := http.NewRequestWithContext(c.Request.Context(), method, urlStr, requestBody)
-	if errNewRequest != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to build request"})
-		return
-	}
-
-	for key, value := range reqHeaders {
-		if strings.EqualFold(key, "host") {
-			hostOverride = strings.TrimSpace(value)
-			continue
+	doRequest := func() (int, http.Header, []byte, error) {
+		var requestBody io.Reader
+		if body.Data != "" {
+			requestBody = strings.NewReader(body.Data)
 		}
-		req.Header.Set(key, value)
-	}
-	if hostOverride != "" {
-		req.Host = hostOverride
+		req, errNewRequest := http.NewRequestWithContext(c.Request.Context(), method, urlStr, requestBody)
+		if errNewRequest != nil {
+			return 0, nil, nil, errNewRequest
+		}
+		hostOverride := ""
+		for key, value := range reqHeaders {
+			if strings.EqualFold(key, "host") {
+				hostOverride = strings.TrimSpace(value)
+				continue
+			}
+			req.Header.Set(key, value)
+		}
+		if hostOverride != "" {
+			req.Host = hostOverride
+		}
+		httpClient := &http.Client{Timeout: defaultAPICallTimeout, Transport: h.apiCallTransport(auth, requestProxyURL)}
+		resp, errDo := httpClient.Do(req)
+		if errDo != nil {
+			return 0, nil, nil, errDo
+		}
+		defer func() {
+			if errClose := resp.Body.Close(); errClose != nil {
+				log.Errorf("response body close error: %v", errClose)
+			}
+		}()
+		respBody, errReadAll := io.ReadAll(resp.Body)
+		if errReadAll != nil {
+			return 0, nil, nil, errReadAll
+		}
+		return resp.StatusCode, resp.Header.Clone(), respBody, nil
 	}
 
-	httpClient := &http.Client{
-		Timeout: defaultAPICallTimeout,
-	}
-	httpClient.Transport = h.apiCallTransport(auth, requestProxyURL)
-
-	resp, errDo := httpClient.Do(req)
+	statusCode, responseHeaders, respBody, errDo := doRequest()
 	if errDo != nil {
 		log.WithError(errDo).Debug("management APICall request failed")
 		c.JSON(http.StatusBadGateway, gin.H{"error": "request failed"})
 		return
 	}
-	defer func() {
-		if errClose := resp.Body.Close(); errClose != nil {
-			log.Errorf("response body close error: %v", errClose)
+	if shouldProbeCodexUsage(auth, urlStr, statusCode, respBody, time.Now()) {
+		if auth != nil && h.authManager != nil {
+			if _, errProbe := h.authManager.ProbeCodexCooldown(c.Request.Context(), auth.ID); errProbe == nil {
+				statusCode, responseHeaders, respBody, errDo = doRequest()
+				if errDo != nil {
+					log.WithError(errDo).Debug("management APICall request after Codex probe failed")
+					c.JSON(http.StatusBadGateway, gin.H{"error": "request failed"})
+					return
+				}
+			} else {
+				log.WithError(errProbe).Debug("Codex quota probe failed")
+			}
 		}
-	}()
-
-	respBody, errReadAll := io.ReadAll(resp.Body)
-	if errReadAll != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read response"})
-		return
 	}
 
 	c.JSON(http.StatusOK, apiCallResponse{
-		StatusCode: resp.StatusCode,
-		Header:     resp.Header,
+		StatusCode: statusCode,
+		Header:     responseHeaders,
 		Body:       string(respBody),
 	})
+}
+
+type codexUsageProbeWindow struct {
+	ResetAfterSeconds float64 `json:"reset_after_seconds"`
+	ResetAt           float64 `json:"reset_at"`
+}
+
+type codexUsageProbePayload struct {
+	RateLimit *struct {
+		PrimaryWindow   *codexUsageProbeWindow `json:"primary_window"`
+		SecondaryWindow *codexUsageProbeWindow `json:"secondary_window"`
+	} `json:"rate_limit"`
+}
+
+func shouldProbeCodexUsage(auth *coreauth.Auth, targetURL string, statusCode int, body []byte, now time.Time) bool {
+	if auth == nil || !strings.Contains(strings.ToLower(targetURL), "/backend-api/wham/usage") {
+		return false
+	}
+	if auth.Unavailable || auth.Status == coreauth.StatusError || auth.LastError != nil {
+		return true
+	}
+	if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now) {
+		return true
+	}
+	for _, state := range auth.ModelStates {
+		if state == nil {
+			continue
+		}
+		if state.Status == coreauth.StatusError || state.LastError != nil || state.Unavailable {
+			return true
+		}
+	}
+	if statusCode < 200 || statusCode >= 300 {
+		return true
+	}
+	var payload codexUsageProbePayload
+	if json.Unmarshal(body, &payload) != nil || payload.RateLimit == nil {
+		return false
+	}
+	return codexProbeWindowUnstarted(payload.RateLimit.PrimaryWindow, now, 5*time.Hour) ||
+		codexProbeWindowUnstarted(payload.RateLimit.SecondaryWindow, now, 7*24*time.Hour)
+}
+
+func codexProbeWindowUnstarted(window *codexUsageProbeWindow, now time.Time, threshold time.Duration) bool {
+	if window == nil {
+		return false
+	}
+	if window.ResetAfterSeconds > 0 {
+		return time.Duration(window.ResetAfterSeconds*float64(time.Second)) >= threshold
+	}
+	if window.ResetAt > 0 {
+		return time.Unix(int64(window.ResetAt), 0).Sub(now) >= threshold
+	}
+	return false
 }
 
 func firstNonEmptyString(values ...*string) string {
