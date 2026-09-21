@@ -575,6 +575,17 @@ func setCodexBootstrapNowForTest(fn func() time.Time) func() {
 	}
 }
 
+const codexBootstrapMaxBufferedEvents = 16
+
+func isCodexHandshakeMetadataEvent(eventType string) bool {
+	switch eventType {
+	case "response.created", "response.in_progress", "codex.rate_limits", "codex.response.metadata":
+		return true
+	default:
+		return false
+	}
+}
+
 // codexBootstrapMaxBufferedFrames bounds how many upstream frames may be held back while probing
 // for a rejection embedded in an HTTP 200 stream. It counts frames read from the upstream, not
 // chunks handed downstream: a frame the downstream translator does not recognise renders as zero
