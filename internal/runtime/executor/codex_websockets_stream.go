@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -276,12 +277,28 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	if optimizeMultiAgentV2 || multiAgentV2Conflict {
 		sess.setMultiAgentV2Optimized(conn, optimizeMultiAgentV2 && !multiAgentV2Conflict)
 	}
+	if input := cliproxyexecutor.WebsocketInputFromContext(ctx); input != nil && e.cfg != nil && (e.cfg.Codex.ResponseSteering || e.cfg.CodexResponseSteering) {
+		prepared := &codexWebsocketPrepared{
+			from: from, responseFormat: responseFormat, to: to,
+			preserveNativeOutput: preserveNativeOutput, originalPayload: originalPayload,
+			clientBody: clientBody, upstreamBody: upstreamBody, wsURL: wsURL,
+			wsHeaders: wsHeaders.Clone(), identityState: identityState, replayScope: replayScope,
+			optimizeMultiAgentV2: optimizeMultiAgentV2, multiAgentV2Conflict: multiAgentV2Conflict,
+		}
+		return e.streamCodexDuplex(ctx, auth, req, opts, sess, conn, readCh, input, prepared, reporter, upstreamHeaders, unlockStreamSession), nil
+	}
 
 	buffering := e.cfg != nil && e.cfg.Codex.StreamBootstrapBuffering
 	var fullBuffer *helps.CodexResponseBuffer
 	if e.cfg != nil && e.cfg.Codex.StreamFullBuffering {
 		buffering = true
 		fullBuffer = helps.NewCodexResponseBuffer(e.cfg.Codex.StreamFullBufferMaxBytes)
+	}
+	var bootstrapTimeout time.Duration
+	var bootstrapStart time.Time
+	if buffering && fullBuffer == nil {
+		bootstrapTimeout = e.cfg.Codex.StreamBootstrapTimeoutDuration()
+		bootstrapStart = nowCodexBootstrap()
 	}
 	closeBufferedAttempt := func(reason string, cause error) {
 		if sess != nil {
@@ -302,6 +319,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	var outputItemsFallback [][]byte
 
 	var bufferedChunks [][]byte
+	// Count upstream messages rather than translated chunks so unrecognized
+	// handshake frames cannot keep the bootstrap window open indefinitely.
+	bufferedFrames := 0
+	bufferedBytes := 0
 	var initialChunks [][]byte
 	immediateTerminal := false
 	// bootstrapTerminalErr holds a non-overload terminal failure seen while buffering. It is
@@ -358,6 +379,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				reporter.PublishFailure(ctx, mappedErr)
 				return nil, mappedErr
 			}
+			bufferedFrames++
+			timeSinceStart := nowCodexBootstrap().Sub(bootstrapStart)
+			timeoutReached := fullBuffer == nil && bootstrapTimeout > 0 && timeSinceStart >= bootstrapTimeout
+			windowOpen := fullBuffer != nil || (bufferedFrames <= codexBootstrapMaxBufferedFrames && !timeoutReached)
 			if msgType != websocket.TextMessage {
 				if msgType == websocket.BinaryMessage {
 					errBinary := fmt.Errorf("codex websockets executor: unexpected binary message")
@@ -385,6 +410,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 			payload = bytes.TrimSpace(payload)
 			if len(payload) == 0 {
+				if !windowOpen {
+					break
+				}
 				continue
 			}
 			observeCodexTokenEvent(reporter, payload)
@@ -393,6 +421,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgentV2)
 			// Heartbeats must neither commit the stream nor consume bootstrap capacity.
 			if gjson.GetBytes(payload, "type").String() == "keepalive" {
+				if !windowOpen {
+					break
+				}
 				continue
 			}
 			if fullBuffer != nil {
@@ -583,12 +614,30 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				immediateTerminal = true
 				break
 			}
-			if (isCodexHandshakeMetadataEvent(eventType) || helps.IsCodexEmptyOutputStructure(payload)) && !isTerminalEvent {
-				if len(bufferedChunks) < codexBootstrapMaxBufferedEvents {
+			if fullBuffer != nil {
+				if errBuffer := fullBuffer.Append(currentChunks); errBuffer != nil {
+					closeBufferedAttempt("buffer_limit", errBuffer)
+					helps.RecordAPIWebsocketError(ctx, e.cfg, "buffer_limit", errBuffer)
+					return nil, errBuffer
+				}
+				if !isTerminalEvent {
+					continue
+				}
+				bufferedChunks = fullBuffer.Chunks()
+				immediateTerminal = true
+				break
+			}
+			if windowOpen && isCodexBootstrapBufferableEvent(eventType, payload) && !isTerminalEvent {
+				frameBytes := len(payload)
+				for i := range currentChunks {
+					frameBytes += len(currentChunks[i])
+				}
+				if bufferedBytes+frameBytes <= codexBootstrapMaxBufferedBytes {
+					bufferedBytes += frameBytes
 					bufferedChunks = append(bufferedChunks, currentChunks...)
 					continue
 				}
-				helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap buffer limit %d reached, releasing stream without overload probing", codexBootstrapMaxBufferedEvents)
+				helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap byte limit reached after %d messages / %d bytes, releasing stream without overload probing", bufferedFrames, bufferedBytes)
 			}
 
 			initialChunks = currentChunks

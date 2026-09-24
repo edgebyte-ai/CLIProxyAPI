@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/client/grokbuild"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -257,7 +258,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					}
 					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 					reporter.PublishFailure(ctx, streamErr)
-					if isCodexOverloadBootstrapFailure(terminalBody) && (fullBuffer == nil || fullBuffer.CanReplay()) {
+					// The terminal error itself is allowed immediately after a full
+					// bootstrap window. The preceding frame(s) filled the window; the
+					// error must still be classified as pre-commit and fail over.
+					terminalWindowOpen := fullBuffer != nil || bufferedFrames <= codexBootstrapMaxBufferedFrames+1
+					if isCodexOverloadBootstrapFailure(terminalBody) && terminalWindowOpen && (fullBuffer == nil || fullBuffer.CanReplay()) {
 						// Transient capacity rejection smuggled into an HTTP 200 stream. Fail the
 						// attempt before the downstream headers are committed so the conductor can
 						// transparently retry on another credential, and report the status the
@@ -265,7 +270,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 						if fullBuffer != nil {
 							helps.LogWithRequestID(ctx).Debug("codex executor: buffered response rejected before delivery, failing over")
 						} else {
-							helps.LogWithRequestID(ctx).Debugf("codex executor: bootstrap overload rejection after %d buffered handshake events, failing over", len(bufferedChunks))
+							helps.LogWithRequestID(ctx).Debugf("codex executor: bootstrap overload rejection after %d buffered lines, failing over", bufferedFrames)
 						}
 						return nil, newCodexBootstrapOverloadErr(terminalBody)
 					}
@@ -290,9 +295,15 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					streamErr := newCodexEmptyIncompleteStreamError()
 					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 					reporter.PublishFailure(ctx, streamErr)
-					return nil, streamErr
+					// Not an overload rejection, so it keeps its in-stream delivery: flush what is
+					// held and hand the error downstream, matching the websocket executor and the
+					// contract that only overload and rate-limit rejections fail the attempt over.
+					// The conductor commits a stream once it has seen a payload, so this only takes
+					// effect for downstream formats that render the held frames into a chunk.
+					bootstrapTerminalErr = streamErr
+					break
 				}
-				if isCodexHandshakeMetadataEvent(eventType) || helps.IsCodexEmptyOutputStructure(data) {
+				if isCodexBootstrapBufferableEvent(eventType, data) {
 					isHandshake = true
 				}
 				switch eventType {
