@@ -278,13 +278,6 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		sess.setMultiAgentV2Optimized(conn, optimizeMultiAgentV2 && !multiAgentV2Conflict)
 	}
 	if input := cliproxyexecutor.WebsocketInputFromContext(ctx); input != nil && e.cfg != nil && (e.cfg.Codex.ResponseSteering || e.cfg.CodexResponseSteering) {
-		prepared := &codexWebsocketPrepared{
-			from: from, responseFormat: responseFormat, to: to,
-			preserveNativeOutput: preserveNativeOutput, originalPayload: originalPayload,
-			clientBody: clientBody, upstreamBody: upstreamBody, wsURL: wsURL,
-			wsHeaders: wsHeaders.Clone(), identityState: identityState, replayScope: replayScope,
-			optimizeMultiAgentV2: optimizeMultiAgentV2, multiAgentV2Conflict: multiAgentV2Conflict,
-		}
 		return e.streamCodexDuplex(ctx, auth, req, opts, sess, conn, readCh, input, prepared, reporter, upstreamHeaders, unlockStreamSession), nil
 	}
 
