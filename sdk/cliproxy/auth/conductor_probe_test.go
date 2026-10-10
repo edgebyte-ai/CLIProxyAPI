@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"net/http"
+	"reflect"
 	"testing"
 	"time"
 
@@ -10,14 +11,97 @@ import (
 )
 
 type codexProbeTestExecutor struct {
-	models []string
+	models    []string
+	onExecute func(*Auth) error
 }
 
 func (e *codexProbeTestExecutor) Identifier() string { return "codex" }
 
-func (e *codexProbeTestExecutor) Execute(_ context.Context, _ *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (e *codexProbeTestExecutor) Execute(_ context.Context, auth *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	e.models = append(e.models, req.Model)
+	if e.onExecute != nil {
+		return cliproxyexecutor.Response{}, e.onExecute(auth)
+	}
 	return cliproxyexecutor.Response{}, nil
+}
+
+func TestProbeCodexCooldownIgnoresResultsAfterCredentialReplacement(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	for _, replacementMode := range []string{"credential rotation", "registration replacement"} {
+		for _, success := range []bool{true, false} {
+			outcome := "success"
+			if !success {
+				outcome = "failure"
+			}
+			t.Run(replacementMode+"/"+outcome, func(t *testing.T) {
+				ctx := context.Background()
+				model := "gpt-5.6-sol"
+				retryAt := time.Now().Add(time.Hour)
+				executor := &codexProbeTestExecutor{}
+				manager := NewManager(nil, &RoundRobinSelector{}, nil)
+				manager.RegisterExecutor(executor)
+				initial, errRegister := manager.Register(ctx, &Auth{
+					ID: "probe-stale-" + t.Name(), Provider: "codex", Status: StatusError,
+					Metadata:    map[string]any{"access_token": "old-token"},
+					Unavailable: true, NextRetryAfter: retryAt,
+					Quota: QuotaState{Exceeded: true, Reason: "credential_quota", NextRecoverAt: retryAt},
+					ModelStates: map[string]*ModelState{
+						model: {Unavailable: true, Status: StatusError, NextRetryAfter: retryAt},
+					},
+				})
+				if errRegister != nil {
+					t.Fatalf("register auth: %v", errRegister)
+				}
+
+				var replacement *Auth
+				executor.onExecute = func(probed *Auth) error {
+					updated := probed.Clone()
+					var errReplace error
+					if replacementMode == "credential rotation" {
+						updated.Metadata["access_token"] = "new-token"
+						replacement, errReplace = manager.Update(ctx, updated)
+					} else {
+						manager.Remove(ctx, updated.ID)
+						replacement, errReplace = manager.Register(ctx, updated)
+					}
+					if errReplace != nil {
+						t.Fatalf("replace credential: %v", errReplace)
+					}
+					if success {
+						return nil
+					}
+					return &Error{Code: "usage_limit_reached", Message: "late probe failure", HTTPStatus: http.StatusTooManyRequests}
+				}
+
+				report, errProbe := manager.ProbeCodexCooldown(ctx, initial.ID)
+				if errProbe != nil {
+					t.Fatalf("probe cooldown: %v", errProbe)
+				}
+				if len(report.Results) != 1 || report.Results[0].Success != success {
+					t.Fatalf("probe report = %+v; want one result with success %v", report, success)
+				}
+				if replacementMode == "credential rotation" && replacement.CredentialVersion <= initial.CredentialVersion {
+					t.Fatal("replacement did not advance credential version")
+				}
+				if replacementMode == "registration replacement" && (replacement.RegistrationEpoch <= initial.RegistrationEpoch || replacement.CredentialVersion != initial.CredentialVersion) {
+					t.Fatal("replacement must advance registration epoch while retaining credential version")
+				}
+				current, ok := manager.GetByID(initial.ID)
+				if !ok {
+					t.Fatal("replacement credential disappeared")
+				}
+				if !reflect.DeepEqual(current.ModelStates, replacement.ModelStates) || !reflect.DeepEqual(current.Quota, replacement.Quota) || current.Unavailable != replacement.Unavailable || !current.NextRetryAfter.Equal(replacement.NextRetryAfter) {
+					t.Fatalf("late probe changed replacement cooldowns: got %+v; want %+v", current, replacement)
+				}
+				if current.Generation != replacement.Generation || current.Success != replacement.Success || current.Failed != replacement.Failed {
+					t.Fatal("late probe changed replacement execution counters or generation")
+				}
+			})
+		}
+	}
 }
 
 func (*codexProbeTestExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {

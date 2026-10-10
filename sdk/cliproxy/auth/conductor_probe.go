@@ -122,11 +122,11 @@ func (m *Manager) ProbeCodexCooldown(ctx context.Context, authID string) (CodexC
 				probeResult.RetryAt = time.Now().Add(*result.RetryAfter)
 			}
 		}
-		m.MarkResult(ctx, result)
+		m.recordExecutionResult(ctx, result, authSnapshot, false)
 		report.Results = append(report.Results, probeResult)
 	}
 	if len(successful) > 0 {
-		m.clearSuccessfulProbeCooldowns(authID, successful, len(successful) == len(models))
+		m.clearSuccessfulProbeCooldowns(ctx, authSnapshot, successful, len(successful) == len(models))
 	}
 	return report, nil
 }
@@ -179,11 +179,16 @@ func classifyCodexProbeResult(err *Error) string {
 	}
 }
 
-func (m *Manager) clearSuccessfulProbeCooldowns(authID string, models []string, clearCredential bool) {
+func (m *Manager) clearSuccessfulProbeCooldowns(ctx context.Context, probeAuth *Auth, models []string, clearCredential bool) {
+	authID := probeAuth.ID
+	releaseMutation := m.lockAuthMutation(authID)
+	defer releaseMutation()
 	now := time.Now()
 	m.mu.Lock()
 	auth := m.auths[authID]
-	if auth == nil {
+	// A successful response from a replaced credential must not clear the
+	// replacement's cooldowns, even if the account ID was reused.
+	if auth == nil || auth.CredentialVersion != probeAuth.CredentialVersion || auth.RegistrationEpoch != probeAuth.RegistrationEpoch {
 		m.mu.Unlock()
 		return
 	}
@@ -192,22 +197,25 @@ func (m *Manager) clearSuccessfulProbeCooldowns(authID string, models []string, 
 			resetModelState(state, now)
 		}
 	}
-	if clearCredential && auth.Quota.Exceeded {
+	if clearCredential && auth.Quota.Exceeded && !hasUnauthorizedAuthFailure(auth) {
 		auth.Unavailable = false
 		auth.NextRetryAfter = time.Time{}
 		auth.Quota = QuotaState{}
 	}
 	updateAggregatedAvailability(auth, now)
-	if !hasModelError(auth, now) {
+	if !auth.Disabled && auth.Status != StatusDisabled && !hasUnauthorizedAuthFailure(auth) && !hasModelError(auth, now) {
 		auth.LastError = nil
 		auth.StatusMessage = ""
 		auth.Status = StatusActive
 	}
 	auth.Generation++
 	auth.UpdatedAt = now
+	if errPersist := m.persistLocked(context.Background(), auth); errPersist != nil {
+		logEntryWithRequestID(ctx).WithField("auth_id", authID).Warnf("failed to persist auth after successful cooldown probe: %v", errPersist)
+	}
 	snapshot := auth.Clone()
-	_ = m.persist(context.Background(), auth)
 	m.mu.Unlock()
+	releaseMutation()
 	if m.scheduler != nil {
 		m.scheduler.upsertAuth(snapshot)
 	}

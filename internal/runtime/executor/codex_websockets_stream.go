@@ -277,6 +277,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	if optimizeMultiAgentV2 || multiAgentV2Conflict {
 		sess.setMultiAgentV2Optimized(conn, optimizeMultiAgentV2 && !multiAgentV2Conflict)
 	}
+
 	if input := cliproxyexecutor.WebsocketInputFromContext(ctx); input != nil && e.cfg != nil && (e.cfg.Codex.ResponseSteering || e.cfg.CodexResponseSteering) {
 		return e.streamCodexDuplex(ctx, auth, req, opts, sess, conn, readCh, input, prepared, reporter, upstreamHeaders, unlockStreamSession), nil
 	}
@@ -289,6 +290,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	}
 	var bootstrapTimeout time.Duration
 	var bootstrapStart time.Time
+	var exhaustionLogged bool
 	if buffering && fullBuffer == nil {
 		bootstrapTimeout = e.cfg.Codex.StreamBootstrapTimeoutDuration()
 		bootstrapStart = nowCodexBootstrap()
@@ -312,8 +314,8 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	var outputItemsFallback [][]byte
 
 	var bufferedChunks [][]byte
-	// Count upstream messages rather than translated chunks so unrecognized
-	// handshake frames cannot keep the bootstrap window open indefinitely.
+	// bufferedFrames counts every websocket message read during bootstrap, including the ones the
+	// loop skips, so a peer that only sends frames the loop ignores cannot keep the window open.
 	bufferedFrames := 0
 	bufferedBytes := 0
 	var initialChunks [][]byte
@@ -372,10 +374,25 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				reporter.PublishFailure(ctx, mappedErr)
 				return nil, mappedErr
 			}
+			// Count every message ReadMessage returns, including the ones this loop goes on to skip,
+			// so a peer sending only skippable text frames still closes the window. Control frames
+			// are not counted: the websocket library answers ping and pong inside ReadMessage and
+			// never returns them, so only the read deadline bounds a peer that sends nothing else.
+			// windowOpen is carried into the skip branches below rather than breaking here, because
+			// this message has not been processed yet and dropping it would lose a token, or a
+			// terminal event, from the turn.
 			bufferedFrames++
 			timeSinceStart := nowCodexBootstrap().Sub(bootstrapStart)
 			timeoutReached := fullBuffer == nil && bootstrapTimeout > 0 && timeSinceStart >= bootstrapTimeout
 			windowOpen := fullBuffer != nil || (bufferedFrames <= codexBootstrapMaxBufferedFrames && !timeoutReached)
+			if !windowOpen && !exhaustionLogged {
+				exhaustionLogged = true
+				exhausted := "frame budget"
+				if timeoutReached {
+					exhausted = "time budget"
+				}
+				helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap %s exhausted after %d messages read / %v; this message will be released", exhausted, bufferedFrames, timeSinceStart)
+			}
 			if msgType != websocket.TextMessage {
 				if msgType == websocket.BinaryMessage {
 					errBinary := fmt.Errorf("codex websockets executor: unexpected binary message")
@@ -398,6 +415,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					reporter.PublishFailure(ctx, errBinary)
 					return nil, errBinary
 				}
+				// No window check here: ReadMessage only ever returns text or binary, and binary
+				// returned just above, so nothing reaches this line. The empty-payload skip below
+				// is the reachable one and does consult the window.
 				continue
 			}
 
@@ -412,11 +432,8 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
 			helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
 			payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgentV2)
-			// Heartbeats must neither commit the stream nor consume bootstrap capacity.
-			if gjson.GetBytes(payload, "type").String() == "keepalive" {
-				if !windowOpen {
-					break
-				}
+			// Full-response buffering needs no storage for heartbeat messages.
+			if fullBuffer != nil && gjson.GetBytes(payload, "type").String() == "keepalive" {
 				continue
 			}
 			if fullBuffer != nil {
@@ -607,19 +624,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				immediateTerminal = true
 				break
 			}
-			if fullBuffer != nil {
-				if errBuffer := fullBuffer.Append(currentChunks); errBuffer != nil {
-					closeBufferedAttempt("buffer_limit", errBuffer)
-					helps.RecordAPIWebsocketError(ctx, e.cfg, "buffer_limit", errBuffer)
-					return nil, errBuffer
-				}
-				if !isTerminalEvent {
-					continue
-				}
-				bufferedChunks = fullBuffer.Chunks()
-				immediateTerminal = true
-				break
-			}
+			// !isTerminalEvent is redundant against the closed allow-list, which admits no terminal
+			// type, and the empty-payload rule cannot fire on a payload already known non-empty. It
+			// stays as the guard a reader expects to find, and its SSE counterpart is !terminalSuccess.
 			if windowOpen && isCodexBootstrapBufferableEvent(eventType, payload) && !isTerminalEvent {
 				frameBytes := len(payload)
 				for i := range currentChunks {

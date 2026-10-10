@@ -150,10 +150,10 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		changes = append(changes, fmt.Sprintf("codex.stream-bootstrap-timeout: %s -> %s", strings.TrimSpace(oldCfg.Codex.StreamBootstrapTimeout), strings.TrimSpace(newCfg.Codex.StreamBootstrapTimeout)))
 	}
 	if oldCfg.Codex.StreamFullBuffering != newCfg.Codex.StreamFullBuffering {
-		changes = append(changes, fmt.Sprintf("codex.stream-full-buffering: %t -> %t", oldCfg.Codex.StreamFullBuffering, newCfg.Codex.StreamFullBuffering))
+		changes = append(changes, fmt.Sprintf("upstream.codex.stream-full-buffering: %t -> %t", oldCfg.Codex.StreamFullBuffering, newCfg.Codex.StreamFullBuffering))
 	}
 	if oldCfg.Codex.StreamFullBufferMaxBytes != newCfg.Codex.StreamFullBufferMaxBytes {
-		changes = append(changes, fmt.Sprintf("codex.stream-full-buffer-max-bytes: %d -> %d", oldCfg.Codex.StreamFullBufferMaxBytes, newCfg.Codex.StreamFullBufferMaxBytes))
+		changes = append(changes, fmt.Sprintf("upstream.codex.stream-full-buffer-max-bytes: %d -> %d", oldCfg.Codex.StreamFullBufferMaxBytes, newCfg.Codex.StreamFullBufferMaxBytes))
 	}
 	if oldCfg.Client.Codex.OptimizeMultiAgentV2 != newCfg.Client.Codex.OptimizeMultiAgentV2 {
 		changes = append(changes, fmt.Sprintf("client.codex.optimize-multi-agent-v2: %t -> %t", oldCfg.Client.Codex.OptimizeMultiAgentV2, newCfg.Client.Codex.OptimizeMultiAgentV2))

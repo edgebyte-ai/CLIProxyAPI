@@ -230,6 +230,14 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				streamStarted = true
 				break
 			}
+			if fullBuffer != nil {
+				// Heartbeats carry no output and need no retained storage while
+				// waiting for the complete response.
+				trimmed := bytes.TrimSpace(line)
+				if len(trimmed) == 0 || bytes.HasPrefix(trimmed, []byte(":")) || grokbuild.IsKeepaliveSSELine(line) {
+					continue
+				}
+			}
 			var translatedLine []byte
 			isHandshake := false
 			terminalSuccess := false
@@ -258,21 +266,22 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					}
 					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 					reporter.PublishFailure(ctx, streamErr)
-					// The terminal error itself is allowed immediately after a full
-					// bootstrap window. The preceding frame(s) filled the window; the
-					// error must still be classified as pre-commit and fail over.
-					terminalWindowOpen := fullBuffer != nil || bufferedFrames <= codexBootstrapMaxBufferedFrames+1
-					if isCodexOverloadBootstrapFailure(terminalBody) && terminalWindowOpen && (fullBuffer == nil || fullBuffer.CanReplay()) {
-						// Transient capacity rejection smuggled into an HTTP 200 stream. Fail the
-						// attempt before the downstream headers are committed so the conductor can
-						// transparently retry on another credential, and report the status the
-						// upstream refused to put on the wire.
-						if fullBuffer != nil {
-							helps.LogWithRequestID(ctx).Debug("codex executor: buffered response rejected before delivery, failing over")
-						} else {
-							helps.LogWithRequestID(ctx).Debugf("codex executor: bootstrap overload rejection after %d buffered lines, failing over", bufferedFrames)
+					if isCodexOverloadBootstrapFailure(terminalBody) && (fullBuffer == nil || fullBuffer.CanReplay()) {
+						timeSinceStart := nowCodexBootstrap().Sub(bootstrapStart)
+						timeoutReached := fullBuffer == nil && bootstrapTimeout > 0 && timeSinceStart >= bootstrapTimeout
+						if !timeoutReached {
+							// Transient capacity rejection smuggled into an HTTP 200 stream. Fail the
+							// attempt before the downstream headers are committed so the conductor can
+							// transparently retry on another credential, and report the status the
+							// upstream refused to put on the wire.
+							if fullBuffer != nil {
+								helps.LogWithRequestID(ctx).Debug("codex executor: buffered response rejected before delivery, failing over")
+							} else {
+								helps.LogWithRequestID(ctx).Debugf("codex executor: bootstrap overload rejection after %d buffered lines, failing over", bufferedFrames)
+							}
+							return nil, newCodexBootstrapOverloadErr(terminalBody)
 						}
-						return nil, newCodexBootstrapOverloadErr(terminalBody)
+						helps.LogWithRequestID(ctx).Debugf("codex executor: bootstrap overload rejection after %d lines / %v, time budget exhausted; delivering in-stream", bufferedFrames, timeSinceStart)
 					}
 					if fullBuffer != nil {
 						return nil, helps.StopStreamRetry(streamErr)
@@ -404,7 +413,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			if len(bufferedChunks) == 0 && len(initialChunks) == 0 {
+			if fullBuffer == nil && len(bufferedChunks) == 0 && len(initialChunks) == 0 {
 				emptyErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before first payload"}
 				helps.RecordAPIResponseError(ctx, e.cfg, emptyErr)
 				reporter.PublishFailure(ctx, emptyErr)
