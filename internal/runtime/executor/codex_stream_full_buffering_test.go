@@ -33,6 +33,78 @@ func codexFullBufferPartialEvents() []string {
 	return events
 }
 
+func TestCodexFullBufferingHeartbeatsDoNotReleaseFailedAttempt(t *testing.T) {
+	for _, transport := range []string{"http", "websocket"} {
+		t.Run(transport, func(t *testing.T) {
+			padding := strings.Repeat("h", codexBootstrapMaxBufferedBytes/codexBootstrapMaxBufferedFrames+1)
+			var server *httptest.Server
+			if transport == "http" {
+				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = fmt.Fprintf(w, "data: %s\n\ndata: %s\n\n", codexCreatedEvent, codexOutputDeltaEvent)
+					for i := 0; i <= codexBootstrapMaxBufferedFrames; i++ {
+						_, _ = fmt.Fprintf(w, ": keepalive %s\n\n", padding)
+					}
+					_, _ = fmt.Fprintf(w, "data: %s\n\n", codexOverloadEvent)
+				}))
+			} else {
+				events := []string{codexCreatedEvent, codexOutputDeltaEvent}
+				for i := 0; i <= codexBootstrapMaxBufferedFrames; i++ {
+					events = append(events, fmt.Sprintf(`{"type":"keepalive","padding":%q}`, padding))
+				}
+				server = codexWebsocketServerHoldingConnection(t, append(events, codexOverloadEvent)...)
+			}
+			defer server.Close()
+			req, opts := codexTestRequest()
+			execute := NewCodexExecutor(codexFullBufferingConfig()).ExecuteStream
+			if transport == "websocket" {
+				execute = NewCodexWebsocketsExecutor(codexFullBufferingConfig()).ExecuteStream
+				req, opts = codexWebsocketRequest()
+			}
+			result, errExecute := execute(context.Background(), codexTestAuth(server.URL), req, opts)
+			if result != nil || errExecute == nil {
+				t.Fatalf("heartbeats released a failed attempt before completion: result=%v err=%v", result, errExecute)
+			}
+			if got := statusCodeFromTestError(t, errExecute); got != http.StatusServiceUnavailable {
+				t.Fatalf("status code = %d, want %d", got, http.StatusServiceUnavailable)
+			}
+		})
+	}
+}
+
+func TestCodexFullBufferingEOFDoesNotExposeOutputOrReplayUpstreamTools(t *testing.T) {
+	for _, transport := range []string{"http", "websocket"} {
+		for _, upstreamTool := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/upstream-tool=%t", transport, upstreamTool), func(t *testing.T) {
+				events := []string{codexCreatedEvent, codexOutputDeltaEvent}
+				if upstreamTool {
+					events = append(events, `{"type":"response.output_item.added","item":{"type":"mcp_call","name":"write_external_record"}}`)
+				}
+				var server *httptest.Server
+				req, opts := codexTestRequest()
+				execute := NewCodexExecutor(codexFullBufferingConfig()).ExecuteStream
+				if transport == "websocket" {
+					server = codexWebsocketServer(t, events...)
+					execute = NewCodexWebsocketsExecutor(codexFullBufferingConfig()).ExecuteStream
+					req, opts = codexWebsocketRequest()
+				} else {
+					server = codexSSEServer(events...)
+				}
+				defer server.Close()
+				result, errExecute := execute(context.Background(), codexTestAuth(server.URL), req, opts)
+				if result != nil || errExecute == nil {
+					t.Fatalf("EOF exposed an unfinished response: result=%v err=%v", result, errExecute)
+				}
+				var stopped interface{ IsRequestStop() bool }
+				isStopped := errors.As(errExecute, &stopped) && stopped.IsRequestStop()
+				if isStopped != upstreamTool {
+					t.Fatalf("request retry stopped = %t, want %t after upstream tool execution", isStopped, upstreamTool)
+				}
+			})
+		}
+	}
+}
+
 func TestCodexFullBufferingFailoverAfterPartialToolCall(t *testing.T) {
 	for _, transport := range []string{"http", "websocket", "downstream-websocket"} {
 		for _, terminal := range []struct{ name, event string }{

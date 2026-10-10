@@ -12,7 +12,7 @@ import (
 func TestSharedUpstreamConfigSurvivesMigrationAndSnapshots(t *testing.T) {
 	legacy := []byte(`auth-dir: client-auth
 auth-auto-refresh-workers: 3
-codex: {disable-codex-cloaking: true, stream-bootstrap-buffering: true, stream-bootstrap-timeout: 10s, orphan-delegation-compatibility: true, model-level-cooling: true, response-steering: true}
+codex: {disable-codex-cloaking: true, stream-bootstrap-buffering: true, stream-bootstrap-timeout: 10s, stream-full-buffering: true, stream-full-buffer-max-bytes: 1048576, orphan-delegation-compatibility: true, model-level-cooling: true, response-steering: true}
 claude: {model-level-cooling: true}
 claude-code: {disable-cloaking-model-list: true}
 disable-claude-cloak-mode: true
@@ -22,7 +22,7 @@ oauth: {auth-dir: client-auth, auth-auto-refresh-workers: 3, providers: {codex: 
 api-keys: {codex: [{base-url: https://example.invalid, keys: [{api-key: test-key, disable-codex-cloaking: false}]}]}
 `)
 	canonical := []byte(`upstream:
-  codex: {disable-codex-cloaking: true, stream-bootstrap-buffering: true, stream-bootstrap-timeout: 10s, orphan-delegation-compatibility: true, model-level-cooling: true, response-steering: true}
+  codex: {disable-codex-cloaking: true, stream-bootstrap-buffering: true, stream-bootstrap-timeout: 10s, stream-full-buffering: true, stream-full-buffer-max-bytes: 1048576, orphan-delegation-compatibility: true, model-level-cooling: true, response-steering: true}
   claude:
     model-level-cooling: true
     disable-cloaking-model-list: true
@@ -36,7 +36,7 @@ api-keys: {codex: [{base-url: https://example.invalid, keys: [{api-key: test-key
   auth-dir: client-auth
   auth-auto-refresh-workers: 3
   providers:
-    codex: {disable-codex-cloaking: true, stream-bootstrap-buffering: true, stream-bootstrap-timeout: 10s, orphan-delegation-compatibility: true, model-level-cooling: true, response-steering: true, header-defaults: {user-agent: oauth-agent, beta-features: oauth-beta}}
+    codex: {disable-codex-cloaking: true, stream-bootstrap-buffering: true, stream-bootstrap-timeout: 10s, stream-full-buffering: true, stream-full-buffer-max-bytes: 1048576, orphan-delegation-compatibility: true, model-level-cooling: true, response-steering: true, header-defaults: {user-agent: oauth-agent, beta-features: oauth-beta}}
     claude:
       model-level-cooling: true
       claude-code: {disable-cloaking-model-list: true}
@@ -45,7 +45,7 @@ api-keys: {codex: [{base-url: https://example.invalid, keys: [{api-key: test-key
     xai: {inject-x-search: true}
 api-keys: {codex: [{base-url: https://example.invalid, keys: [{api-key: test-key, disable-codex-cloaking: false}]}]}
 `)
-	expected := []any{"client-auth", 3, true, true, "10s", true, true, true, true, true, true, "client-agent", "1.2.3", "v22.1.0", "Linux", "arm64", "123", "Asia/Shanghai", true, true}
+	expected := []any{"client-auth", 3, true, true, "10s", true, int64(1048576), true, true, true, true, true, true, "client-agent", "1.2.3", "v22.1.0", "Linux", "arm64", "123", "Asia/Shanghai", true, true}
 	for _, tc := range []struct {
 		name string
 		raw  []byte
@@ -101,6 +101,7 @@ api-keys: {codex: [{base-url: https://example.invalid, keys: [{api-key: test-key
 						actual := []any{
 							scoped.AuthDir, scoped.AuthAutoRefreshWorkers,
 							scoped.Codex.DisableCodexCloaking, scoped.Codex.StreamBootstrapBuffering, scoped.Codex.StreamBootstrapTimeout,
+							scoped.Codex.StreamFullBuffering, scoped.Codex.StreamFullBufferMaxBytes,
 							scoped.Codex.OrphanDelegationCompatibility, scoped.Codex.ModelLevelCooling, scoped.Codex.ResponseSteering,
 							scoped.Claude.ModelLevelCooling, scoped.ClaudeCode.DisableCloakingModelList, scoped.DisableClaudeCloakMode,
 							scoped.ClaudeHeaderDefaults.UserAgent, scoped.ClaudeHeaderDefaults.PackageVersion, scoped.ClaudeHeaderDefaults.RuntimeVersion,
@@ -124,7 +125,11 @@ api-keys: {codex: [{base-url: https://example.invalid, keys: [{api-key: test-key
 func TestSharedUpstreamPresenceWinsOverHistoricalAliases(t *testing.T) {
 	for _, value := range []string{"false", "null"} {
 		t.Run(value, func(t *testing.T) {
-			raw := []byte("codex: {response-steering: true}\noauth: {providers: {codex: {response-steering: true}, claude: {header-defaults: {user-agent: historical-agent, stabilize-device-profile: true}}}}\nupstream: {codex: {response-steering: " + value + "}, claude: {header-defaults: {user-agent: '', stabilize-device-profile: " + value + "}}}\n")
+			bytesValue := "0"
+			if value == "null" {
+				bytesValue = "null"
+			}
+			raw := []byte("codex: {response-steering: true, stream-full-buffering: true, stream-full-buffer-max-bytes: 1048576}\noauth: {providers: {codex: {response-steering: true, stream-full-buffering: true, stream-full-buffer-max-bytes: 2097152}, claude: {header-defaults: {user-agent: historical-agent, stabilize-device-profile: true}}}}\nupstream: {codex: {response-steering: " + value + ", stream-full-buffering: " + value + ", stream-full-buffer-max-bytes: " + bytesValue + "}, claude: {header-defaults: {user-agent: '', stabilize-device-profile: " + value + "}}}\n")
 			for _, migrate := range []bool{false, true} {
 				data, _, errNormalize := NormalizeConfigLayout(raw, migrate)
 				if errNormalize != nil {
@@ -134,7 +139,7 @@ func TestSharedUpstreamPresenceWinsOverHistoricalAliases(t *testing.T) {
 				if errParse != nil {
 					t.Fatal(errParse)
 				}
-				if cfg.Codex.ResponseSteering || cfg.ClaudeHeaderDefaults.UserAgent != "" || cfg.AuthAutoRefreshWorkers != 0 || (cfg.ClaudeHeaderDefaults.StabilizeDeviceProfile != nil && *cfg.ClaudeHeaderDefaults.StabilizeDeviceProfile) {
+				if cfg.Codex.ResponseSteering || cfg.Codex.StreamFullBuffering || cfg.Codex.StreamFullBufferMaxBytes != 0 || cfg.ClaudeHeaderDefaults.UserAgent != "" || cfg.AuthAutoRefreshWorkers != 0 || (cfg.ClaudeHeaderDefaults.StabilizeDeviceProfile != nil && *cfg.ClaudeHeaderDefaults.StabilizeDeviceProfile) {
 					t.Fatal("historical alias overrode an explicit shared zero value")
 				}
 				if migrate {

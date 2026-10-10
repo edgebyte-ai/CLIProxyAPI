@@ -27,6 +27,9 @@ func TestV8ExampleLoadsAndRoundTrips(t *testing.T) {
 	if active.Port != 8317 || len(active.APIKeys) != 3 || active.RequestRetry != 3 || !active.QuotaExceeded.AntigravityCredits {
 		t.Fatal("v8 template lost its default configuration")
 	}
+	if active.Codex.StreamFullBuffering || active.Codex.StreamFullBufferMaxBytes != 67108864 {
+		t.Fatal("v8 template lost its Codex full-buffer configuration")
+	}
 	if err = ValidateV8Config(example); err != nil {
 		t.Fatalf("active template must use the v8 layout: %v", err)
 	}
