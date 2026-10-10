@@ -93,6 +93,7 @@ func TestManagementV8IndependentContract(t *testing.T) {
 		"POST /v8/management/routing/cooldown/reset",
 		"POST /v8/management/routing/model-definitions/refresh",
 		"POST /v8/management/models/refresh",
+		"POST /v8/management/quota/fetch",
 		"GET /v8/management/plugins/:id/quota", "POST /v8/management/plugins/:id/quota", "DELETE /v8/management/plugins/:id/quota",
 		"POST /v8/management/plugins/store/:id/install", "DELETE /v8/management/plugins/:id",
 	} {
@@ -130,6 +131,7 @@ func TestManagementV8IndependentContract(t *testing.T) {
 		method, url, body string
 		status            int
 	}{
+		{http.MethodPost, "/v8/management/quota/fetch", `{"error":"invalid request body"}`, http.StatusBadRequest},
 		{http.MethodGet, "/v8/management/oauth/auth-url", `{"error":"provider is required"}`, http.StatusBadRequest},
 		{http.MethodGet, "/v8/management/oauth/auth-url?provider=%20", `{"error":"provider is required"}`, http.StatusBadRequest},
 		{http.MethodGet, "/v8/management/oauth/auth-url?provider=unknown", `{"error":"provider_not_found"}`, http.StatusNotFound},

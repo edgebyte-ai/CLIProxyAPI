@@ -90,6 +90,7 @@ retain the corresponding business operation's fields.
 | `/config/upstream/<provider>` | GET, PUT, PATCH, DELETE | Manage shared provider settings. |
 | `/server/latest-version` | GET | Get latest release information. |
 | `/requests/api-call` | POST | Make an authenticated upstream call. |
+| `/quota/fetch` | POST | Fetch credential quota using its registered plugin or declarative probe. |
 | `/routing/cooldown/reset` | POST | Clear credential cooldown. |
 | `/routing/model-definitions/<channel>` | GET | Get model definitions. |
 | `/observability/logs` | GET, DELETE | Read or clear application logs. |
@@ -116,6 +117,28 @@ retain the corresponding business operation's fields.
 | `/plugins/store` | GET | List the plugin store. |
 | `/plugins/store/<id>/install` | POST | Install or update a plugin. |
 | `/plugins/<id>/quota` | GET, POST, DELETE | Read, fetch, or reset plugin quota. |
+
+### Credential quota queries
+
+The management panel uses `POST /v8/management/quota/fetch` when it has a
+credential's `auth_index` but does not know the quota plugin's ID:
+
+```json
+{
+  "auth_index": "credential-index"
+}
+```
+
+An optional `provider` selects the quota provider; otherwise the credential's
+provider is used. An optional `plugin_id` selects a specific plugin. The server
+uses its registered quota-provider selection rules and falls back to the
+credential's declarative `quota_probe` when no plugin handles the query. Responses
+retain the normalized quota groups, subscription, and summary fields expected by
+the management panel. Calls require the same management key as other v8 routes.
+
+Use `/plugins/<id>/quota` when the plugin ID is already known. The removed
+`/credentials/quota/providers`, `/credentials/quota/fetch`, and
+`/credentials/quota/reset` paths remain unavailable.
 
 ## OAuth
 
