@@ -6382,8 +6382,8 @@ func TestClaudeOpus55FallbackReconcilesAfterModelOverride(t *testing.T) {
 	got := reconcileClaudeCodeFableModelAfterPayload(
 		[]byte(`{"model":"claude-opus-5-5","system":[]}`), claudeCodeFableState{}, false, false, true, false,
 	)
-	if fallback := ojson.GetBytes(got, "fallbacks.0.model").String(); fallback != "claude-opus-4-8" {
-		t.Errorf("Sonnet rewritten to Opus fallback = %q", fallback)
+	if fallback := ojson.GetBytes(got, "fallbacks"); fallback.Exists() {
+		t.Errorf("Sonnet rewritten to Opus invented fallback = %s", fallback.Raw)
 	}
 }
 
