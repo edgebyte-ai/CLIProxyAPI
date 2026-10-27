@@ -5805,7 +5805,7 @@ func TestApplyCloaking_PreservesConfiguredStrictModeAndSensitiveWordsWhenModeOmi
 	}
 }
 
-func TestApplyCloaking_Opus55FallbackOnlyForUnconfirmedClients(t *testing.T) {
+func TestApplyCloaking_Opus55PreservesOnlyExplicitFallbacks(t *testing.T) {
 	cfg := &config.Config{ClaudeKey: []config.ClaudeKey{{
 		APIKey: "sk-ant-oat-opus55-test", Cloak: &config.CloakConfig{},
 	}}}
@@ -5816,7 +5816,7 @@ func TestApplyCloaking_Opus55FallbackOnlyForUnconfirmedClients(t *testing.T) {
 		confirmed bool
 		wantModel string
 	}{
-		{name: "non-native Opus 5.5", payload: `{"model":"claude-opus-5-5","messages":[{"role":"user","content":"test"}]}`, wantModel: "claude-opus-4-8"},
+		{name: "non-native Opus 5.5", payload: `{"model":"claude-opus-5-5","messages":[{"role":"user","content":"test"}]}`},
 		{name: "native Opus 5.5 stays untouched", payload: `{"model":"claude-opus-5-5","messages":[{"role":"user","content":"test"}]}`, confirmed: true},
 		{name: "caller fallback takes precedence", payload: `{"model":"claude-opus-5-5","fallbacks":[{"model":"claude-sonnet-5"}],"messages":[{"role":"user","content":"test"}]}`, wantModel: "claude-sonnet-5"},
 		{name: "other model does not inherit fallback", payload: `{"model":"claude-opus-5","messages":[{"role":"user","content":"test"}]}`},
@@ -5847,7 +5847,7 @@ func TestApplyCloaking_Opus55FallbackOnlyForUnconfirmedClients(t *testing.T) {
 	}
 }
 
-func TestClaudeExecutor_CloakedOpus55PairsFallbackAndBetas(t *testing.T) {
+func TestClaudeExecutor_CloakedOpus55DoesNotInventFallbackOrBetas(t *testing.T) {
 	var seenBody []byte
 	var seenHeaders http.Header
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -5869,15 +5869,18 @@ func TestClaudeExecutor_CloakedOpus55PairsFallbackAndBetas(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := gjson.GetBytes(seenBody, "fallbacks.0.model").String(); got != "claude-opus-4-8" {
-		t.Errorf("fallback model = %q", got)
+	if got := gjson.GetBytes(seenBody, "fallbacks"); got.Exists() {
+		t.Errorf("unexpected fallback = %s", got.Raw)
+	}
+	for _, beta := range []string{claudeServerSideFallbackBeta, claudeFallbackCreditBeta} {
+		if strings.Contains(seenHeaders.Get("Anthropic-Beta"), beta) {
+			t.Errorf("unexpected %s beta", beta)
+		}
 	}
 	for _, beta := range []string{
 		claudePerTurnControlBeta,
 		claudeMidConvSystemClearAtBeta,
 		claudeThinkingBindingBeta,
-		claudeServerSideFallbackBeta,
-		claudeFallbackCreditBeta,
 	} {
 		if !strings.Contains(seenHeaders.Get("Anthropic-Beta"), beta) {
 			t.Errorf("missing %s beta", beta)
@@ -5901,7 +5904,7 @@ func TestClaudeOpus55FallbackReconcilesAfterModelOverride(t *testing.T) {
 	}{
 		{name: "switch to Sonnet", body: `{"model":"claude-sonnet-5","fallbacks":[{"model":"claude-opus-4-8"}],"system":[{"type":"text","text":"billing"}]}`},
 		{name: "switch to Fable", body: `{"model":"claude-fable-5-1","fallbacks":[{"model":"claude-opus-4-8"}],"system":[{"type":"text","text":"billing"}]}`, wantFallback: "claude-opus-5"},
-		{name: "same Opus", body: string(cloaked), wantFallback: "claude-opus-4-8"},
+		{name: "same Opus", body: string(cloaked)},
 		{name: "Opus probe", body: string(cloaked), probe: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -5914,8 +5917,8 @@ func TestClaudeOpus55FallbackReconcilesAfterModelOverride(t *testing.T) {
 	got := reconcileClaudeCodeFableModelAfterPayload(
 		[]byte(`{"model":"claude-opus-5-5","system":[]}`), claudeCodeFableState{}, false, false, true, false,
 	)
-	if fallback := gjson.GetBytes(got, "fallbacks.0.model").String(); fallback != "claude-opus-4-8" {
-		t.Errorf("Sonnet rewritten to Opus fallback = %q", fallback)
+	if fallback := gjson.GetBytes(got, "fallbacks"); fallback.Exists() {
+		t.Errorf("Sonnet rewritten to Opus invented fallback = %s", fallback.Raw)
 	}
 }
 

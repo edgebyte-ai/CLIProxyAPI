@@ -1130,8 +1130,6 @@ func reconcileClaudeCodeFableModelAfterPayload(
 		switch {
 		case isClaudeFable51Model(currentModel):
 			wantFallback = "claude-opus-5"
-		case isClaudeOpus55Model(currentModel):
-			wantFallback = "claude-opus-4-8"
 		}
 		if gjson.GetBytes(body, "fallbacks.0.model").String() != wantFallback {
 			body, _ = sjson.DeleteBytes(body, "fallbacks")
@@ -1183,9 +1181,6 @@ func reconcileClaudeCodeFableModelAfterPayload(
 		return body
 	}
 
-	if isClaudeOpus55Model(currentModel) && !gjson.GetBytes(body, "fallbacks").Exists() && !payloadTouchedFallbacks {
-		body, _ = sjson.SetRawBytes(body, "fallbacks", []byte(`[{"model":"claude-opus-4-8"}]`))
-	}
 	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
 	thinkingActive := thinkingType == "adaptive" || thinkingType == "enabled"
 	// Payload rules can disable thinking without touching display. Remove only
@@ -1848,9 +1843,8 @@ func applyCloakingInternal(
 	// In native Claude Code 2.1.258, claude-fable-5-1 requests carry:
 	// "fallbacks": [{"model": "claude-opus-5"}]
 	model := strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, "model").String()))
-	if isClaudeOpus55Model(model) && !isProbeOrHelper && !gjson.GetBytes(payload, "fallbacks").Exists() {
-		payload, _ = sjson.SetRawBytes(payload, "fallbacks", []byte(`[{"model":"claude-opus-4-8"}]`))
-	}
+	// Opus 5.5 fallback targets depend on the upstream model catalog. Preserve
+	// explicit caller choices without inventing a target from the CLI fingerprint.
 	if isClaudeFable51Model(model) && !isProbeOrHelper {
 		if !gjson.GetBytes(payload, "fallbacks").Exists() {
 			payload, _ = sjson.SetRawBytes(payload, "fallbacks", []byte(`[{"model":"claude-opus-5"}]`))
