@@ -168,3 +168,27 @@ func TestFillFirstDefaultSessionDoesNotChangeOtherStrategiesOrUnknownCallers(t *
 		})
 	}
 }
+
+func TestFillFirstDefaultSessionRespectsQuotaOnlyRebinding(t *testing.T) {
+	t.Parallel()
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &FillFirstSelector{}, RebindOn: SessionAffinityRebindOnQuota,
+	})
+	defer selector.Stop()
+	bound := &Auth{ID: "bound"}
+	higher := &Auth{ID: "higher", Attributes: map[string]string{"priority": "9"}}
+	opts := defaultSessionTestOptions("caller", "first")
+	assertDefaultSessionPick(t, selector, "codex", "model", opts, []*Auth{bound}, bound.ID)
+
+	// Transient failures must retain the binding even when a higher-priority
+	// credential becomes available before the next independent request.
+	selector.OnResult(Result{AuthID: bound.ID, Provider: "codex", Model: "model", Options: opts,
+		Error: &Error{HTTPStatus: http.StatusServiceUnavailable}})
+	assertDefaultSessionPick(t, selector, "codex", "model", defaultSessionTestOptions("caller", "after transient failure"), []*Auth{bound, higher}, bound.ID)
+
+	// A quota failure releases the same default binding so normal priority
+	// selection can take over on the next request.
+	selector.OnResult(Result{AuthID: bound.ID, Provider: "codex", Model: "model", Options: opts,
+		Error: &Error{HTTPStatus: http.StatusTooManyRequests}})
+	assertDefaultSessionPick(t, selector, "codex", "model", defaultSessionTestOptions("caller", "after quota failure"), []*Auth{bound, higher}, higher.ID)
+}
