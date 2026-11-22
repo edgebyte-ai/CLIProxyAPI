@@ -1454,6 +1454,11 @@ plugins:
   # auth-revision: 0
 
   configs:
+    # Optional standalone Decisions plugin (see examples/plugin/decisions-proxy).
+    # decisions-proxy:
+    #   enabled: true
+    #   upstream-url: "https://api.openai.com/v1/decisions"
+    #   api-key-env: "DECISIONS_UPSTREAM_KEY" # Or set api-key directly, not both.
     example:
       enabled: true
       priority: 1

@@ -153,6 +153,9 @@ func (c *hostHTTPClient) doHTTP(ctx context.Context, req pluginapi.HTTPRequest) 
 	if method == "" {
 		method = http.MethodGet
 	}
+	if req.MaxResponseBytes < 0 {
+		return nil, nil, nil, errors.New("max_response_bytes must be non-negative")
+	}
 	httpReq, errNewRequest := http.NewRequestWithContext(ctx, method, req.URL, bytes.NewReader(bytes.Clone(req.Body)))
 	if errNewRequest != nil {
 		return nil, cfg, nil, fmt.Errorf("create host http request: %w", errNewRequest)
@@ -166,6 +169,9 @@ func (c *hostHTTPClient) doHTTP(ctx context.Context, req pluginapi.HTTPRequest) 
 	if client == nil {
 		client = &http.Client{}
 	}
+	if req.DisableRedirects {
+		client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	}
 	cliproxyexecutor.MarkUpstreamAttempt(ctx)
 	resp, errDo := client.Do(httpReq)
 	if errDo != nil {
@@ -174,6 +180,9 @@ func (c *hostHTTPClient) doHTTP(ctx context.Context, req pluginapi.HTTPRequest) 
 		}
 		helps.RecordAPIResponseError(ctx, cfg, errDo)
 		return nil, cfg, nil, fmt.Errorf("execute host http request: %w", errDo)
+	}
+	if req.MaxResponseBytes > 0 {
+		resp.Body = http.MaxBytesReader(nil, resp.Body, req.MaxResponseBytes)
 	}
 	return resp, cfg, cleanup, nil
 }

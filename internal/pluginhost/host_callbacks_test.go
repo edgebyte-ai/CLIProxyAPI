@@ -73,6 +73,58 @@ func TestHostHTTPDoCallbackUsesHostHTTPClient(t *testing.T) {
 	}
 }
 
+func TestHostHTTPDoRedirectAndResponseLimit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/redirect" {
+			w.Header().Set("Location", "/payload")
+			w.WriteHeader(http.StatusTemporaryRedirect)
+			return
+		}
+		w.(http.Flusher).Flush() // The response limit must also work without Content-Length.
+		_, _ = w.Write([]byte("1234"))
+	}))
+	defer server.Close()
+
+	host := New()
+	for _, tc := range []struct {
+		name   string
+		nested bool
+		path   string
+		limit  int
+		status int
+	}{
+		{"no redirect", false, "/redirect", 3, http.StatusTemporaryRedirect},
+		{"exact size", true, "/payload", 4, http.StatusOK},
+		{"too large", true, "/payload", 3, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := map[string]any{"url": server.URL + tc.path, "disable_redirects": true, "max_response_bytes": tc.limit}
+			if tc.nested {
+				request = map[string]any{"request": request}
+			}
+			payload, err := json.Marshal(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, errDo := host.callFromPlugin(context.Background(), pluginabi.MethodHostHTTPDo, payload)
+			if tc.status == 0 {
+				var tooLarge *http.MaxBytesError
+				if !errors.As(errDo, &tooLarge) || tooLarge.Limit != int64(tc.limit) {
+					t.Fatalf("expected response size error, got %v", errDo)
+				}
+				return
+			}
+			if errDo != nil {
+				t.Fatal(errDo)
+			}
+			resp, errDecode := decodeRPCEnvelope[pluginapi.HTTPResponse](raw)
+			if errDecode != nil || resp.StatusCode != tc.status || (tc.status == http.StatusOK && string(resp.Body) != "1234") {
+				t.Fatalf("response = %+v, err = %v", resp, errDecode)
+			}
+		})
+	}
+}
+
 func TestHostHTTPDoCallbackRestoresRegisteredRequestContext(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())

@@ -3,6 +3,7 @@ package pluginhost
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 
@@ -80,6 +81,18 @@ func (h *Host) PluginExecutorRequestToFormat(pluginID string, req coreexecutor.R
 		return ""
 	}
 	return adapter.RequestToFormat(req, opts)
+}
+
+// PluginHTTPHandler resolves the current executor for a host-owned HTTP route.
+// No CPA provider credential is selected: this executor supplies its upstream credentials.
+func (h *Host) PluginHTTPHandler(pluginID string) func(context.Context, *http.Request) (*http.Response, error) {
+	adapter, errAdapter := h.executorAdapterForPlugin(pluginID, "")
+	if errAdapter != nil {
+		return nil
+	}
+	return func(ctx context.Context, req *http.Request) (*http.Response, error) {
+		return adapter.HttpRequest(ctx, nil, req)
+	}
 }
 
 // ExecutePluginExecutor executes a request with the named plugin executor without changing the requested model.

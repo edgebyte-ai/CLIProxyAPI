@@ -1220,6 +1220,10 @@ type HTTPRequest struct {
 	Headers http.Header
 	// Body contains the raw request body.
 	Body []byte
+	// DisableRedirects returns the first response without following its Location.
+	DisableRedirects bool `json:"disable_redirects,omitempty"`
+	// MaxResponseBytes limits bytes read from the upstream response body. Zero means unlimited.
+	MaxResponseBytes int64 `json:"max_response_bytes,omitempty"`
 	// WireProfile specifies optional outbound HTTP wire profile settings.
 	WireProfile *HTTPWireProfile `json:"wire_profile,omitempty"`
 }
