@@ -41,6 +41,9 @@ func TestFillFirstDefaultSessionScopeAndConversationIsolation(t *testing.T) {
 	first := defaultSessionTestOptions("api-key-a", "part 6")
 	before := CanonicalSessionID(first.Headers, first.OriginalRequest, first.Metadata)
 	assertDefaultSessionPick(t, selector, "codex", "model", first, []*Auth{low}, low.ID)
+	if bound, okBound := selector.boundAuthForRequest([]string{"codex"}, "model", first); !okBound || bound != low.ID {
+		t.Fatalf("bound auth for default session = (%q, %v), want (%q, true)", bound, okBound, low.ID)
+	}
 	selector.OnResult(Result{AuthID: low.ID, Provider: "codex", Model: "model", Success: true, Options: first})
 	if after := CanonicalSessionID(first.Headers, first.OriginalRequest, first.Metadata); after != before {
 		t.Fatalf("default routing changed conversation identity: %q -> %q", before, after)

@@ -2416,6 +2416,11 @@ func (s *SessionAffinitySelector) boundAuthForRequest(providers []string, model 
 	}
 
 	explicitID, explicitFallbackID := extractExplicitSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	if explicitID == "" && s.cache != nil {
+		if cacheKey := sessionMetadataString(opts.Metadata, defaultSessionAffinityCacheKeyMetadataKey); cacheKey != "" {
+			return s.cache.Get(cacheKey)
+		}
+	}
 	if explicitID == "" && s.matcher != nil {
 		turns := cliproxysession.ExtractCanonicalTurns(opts.SourceFormat, opts.OriginalRequest)
 		if len(turns) > 0 {

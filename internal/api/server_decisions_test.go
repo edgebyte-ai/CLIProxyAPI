@@ -8,11 +8,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
-	"github.com/tidwall/gjson"
 )
 
 type decisionsTestExecutor struct {
@@ -61,7 +61,7 @@ func TestDecisionsRoute(t *testing.T) {
 		if len(req.Headers) != 2 || req.Headers.Get("Content-Type") != "application/json" || req.Headers.Get("Accept") != "application/json" {
 			t.Fatalf("unexpected outbound headers: %v", req.Headers)
 		}
-		if gjson.GetBytes(req.Body, "private").Exists() || gjson.GetBytes(req.Body, "questions.0.type").String() != "predicate" {
+		if ojson.GetBytesNoCopy(req.Body, "private").Exists() || ojson.GetBytesNoCopy(req.Body, "questions.0.type").String() != "predicate" {
 			t.Fatalf("wrong finalized payload: %s", req.Body)
 		}
 		if dispatchErr != nil {

@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 const defaultCodexResponseBufferBytes int64 = 64 * 1024 * 1024
@@ -31,12 +31,12 @@ func NewCodexResponseBuffer(limit int64) *CodexResponseBuffer {
 // ObserveEvent prevents replay after tools that may execute on the upstream.
 // Client-executed function/custom tool calls remain safe while their output is withheld.
 func (b *CodexResponseBuffer) ObserveEvent(data []byte) {
-	event := gjson.GetBytes(data, "type").String()
-	itemType := gjson.GetBytes(data, "item.type").String()
+	event := ojson.GetBytesNoCopy(data, "type").String()
+	itemType := ojson.GetBytesNoCopy(data, "item.type").String()
 	if strings.HasSuffix(itemType, "_call") && itemType != "function_call" && itemType != "custom_tool_call" {
 		b.upstreamTool = true
 	}
-	gjson.GetBytes(data, "response.output").ForEach(func(_, item gjson.Result) bool {
+	ojson.GetBytesNoCopy(data, "response.output").ForEach(func(_, item ojson.Result) bool {
 		typ := item.Get("type").String()
 		if strings.HasSuffix(typ, "_call") && typ != "function_call" && typ != "custom_tool_call" {
 			b.upstreamTool = true
@@ -73,11 +73,11 @@ func (b *CodexResponseBuffer) Chunks() [][]byte { return b.chunks }
 
 // ValidateCodexBufferedTerminal rejects incomplete output without pretending it completed.
 func ValidateCodexBufferedTerminal(data []byte) error {
-	switch gjson.GetBytes(data, "type").String() {
+	switch ojson.GetBytesNoCopy(data, "type").String() {
 	case "response.incomplete":
 		return newBufferedResponseError("response_incomplete", "Codex returned an incomplete response before buffered output could be delivered")
 	case "response.completed", "response.done":
-		status := gjson.GetBytes(data, "response.status").String()
+		status := ojson.GetBytesNoCopy(data, "response.status").String()
 		if status != "" && status != "completed" {
 			return newBufferedResponseError("response_incomplete", "Codex terminal response was not completed")
 		}

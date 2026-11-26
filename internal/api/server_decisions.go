@@ -5,12 +5,12 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 const (
@@ -34,7 +34,7 @@ func (s *Server) decisions(c *gin.Context) {
 		c.JSON(clienterror.HTTPStatusFromErrorOr(errRead, http.StatusBadRequest), gin.H{"error": "Failed to read decisions request"})
 		return
 	}
-	model := gjson.GetBytes(body, "model").String()
+	model := ojson.GetBytesNoCopy(body, "model").String()
 	body = helps.ApplyPayloadConfigWithRequestForExecutor(cfg, decisionsPluginID, model, "decisions", "decisions", "", body, body, model, decisionsPath, c.Request.Header)
 	ctx := c.Request.Context()
 	// Only send the fixed endpoint and finalized payload to the plugin. CPA frontend
